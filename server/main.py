@@ -48,21 +48,27 @@ async def upload_file(
     file: UploadFile = File(...),
     target_path: str = Form("C:\\ExamFiles")
 ):
-    """
-    Загрузка файла агенту.
-    target_path — путь, куда агент должен сохранить файл.
-    """
     client = clients.get(client_id)
     if not client:
         return JSONResponse({"status": "offline"})
 
+    ws = client["ws"]
     content = await file.read()
     encoded = base64.b64encode(content).decode("utf-8")
 
-    ws = client["ws"]
-    await ws.send_text(f"file:{target_path}:{file.filename}:{encoded}")
-    print(f"--> Sent file '{file.filename}' to {client_id} → {target_path}")
+    # Используем безопасный разделитель
+    sep = "|||"
 
+    await ws.send_text(f"file_start{sep}{target_path}{sep}{file.filename}")
+
+    chunk_size = 8000
+    for i in range(0, len(encoded), chunk_size):
+        chunk = encoded[i:i + chunk_size]
+        await ws.send_text(f"file_data:{chunk}")
+
+    await ws.send_text("file_end")
+
+    print(f"--> Sent file '{file.filename}' to {client_id} → {target_path}")
     return JSONResponse({
         "status": "sent",
         "filename": file.filename,
