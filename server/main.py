@@ -128,3 +128,27 @@ async def upload_folder(client_id: str, source_path: str = Form(...), target_pat
     os.remove(tmp_zip)
     print(f"--> Sent folder '{source_path}' as {zip_name} → {target_path}")
     return {"status": "sent", "folder": source_path, "target": target_path}
+
+@app.post("/clean_folder/{client_id}")
+async def clean_folder(client_id: str, path: str = Form(...)):
+    """
+    Очищает указанную папку на клиенте, кроме .exe и .lnk файлов.
+    """
+    client = clients.get(client_id)
+    if not client:
+        return JSONResponse({"status": "offline"})
+
+    ws = client["ws"]
+    queue = client["queue"]
+
+    command = f"clean_dir:{path}"
+    await ws.send_text(command)
+    print(f"--> Sent cleanup command to {client_id}: {path}")
+
+    try:
+        result = await asyncio.wait_for(queue.get(), timeout=10.0)
+        return JSONResponse({"status": "ok", "result": json.loads(result)})
+    except asyncio.TimeoutError:
+        return JSONResponse({"status": "timeout"})
+    except json.JSONDecodeError:
+        return JSONResponse({"status": "ok", "result": result})
