@@ -7,11 +7,13 @@ using System.Threading.Tasks;
 
 class StudentAgent
 {
-    static async Task Main()
+    static async Task Main(string[] args)
     {
-        var client = new ClientWebSocket();
-        string studentId = "student01";
+        string studentId = args.Length > 0 ? args[0] : Environment.UserName;
         string serverUrl = $"ws://127.0.0.1:8000/ws/{studentId}";
+        Console.WriteLine($"Connecting as {studentId}...");
+
+        var client = new ClientWebSocket();
         await client.ConnectAsync(new Uri(serverUrl), CancellationToken.None);
         Console.WriteLine("Connected to server...");
 
@@ -64,6 +66,79 @@ class StudentAgent
                 string desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
                 await SendText(client, desktop);
                 Console.WriteLine($"Desktop path sent: {desktop}");
+            }
+            else if (msg.StartsWith("listdir:"))
+            {
+                string path = msg.Substring(8).Trim();
+                try
+                {
+                    if (Directory.Exists(path))
+                    {
+                        var dirs = Directory.GetDirectories(path);
+                        var files = Directory.GetFiles(path);
+
+                        // Формируем JSON вручную
+                        var json = new StringBuilder();
+                        json.Append("{");
+                        json.Append("\"folders\":[");
+                        json.Append(string.Join(",", Array.ConvertAll(dirs, d => $"\"{d.Replace("\\", "\\\\")}\"")));
+                        json.Append("],");
+                        json.Append("\"files\":[");
+                        json.Append(string.Join(",", Array.ConvertAll(files, f => $"\"{f.Replace("\\", "\\\\")}\"")));
+                        json.Append("]");
+                        json.Append("}");
+
+                        await SendText(client, json.ToString());
+                        Console.WriteLine($"Listed {path}");
+                    }
+                    else
+                    {
+                        await SendText(client, $"{{\"error\":\"Path not found: {path}\"}}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await SendText(client, $"{{\"error\":\"{ex.Message}\"}}");
+                }
+            }
+            else if (msg.StartsWith("zip_start"))
+            {
+                string[] parts = msg.Split(new string[] { "|||" }, StringSplitOptions.None);
+                currentPath = parts[1];
+                currentName = parts[2];
+                fileBuffer.Clear();
+                receivingFile = true;
+                Console.WriteLine($"Receiving ZIP {currentName} to {currentPath}...");
+            }
+            else if (msg.StartsWith("zip_data:") && receivingFile)
+            {
+                fileBuffer.Append(msg.Substring(9));
+            }
+            else if (msg == "zip_end" && receivingFile)
+            {
+                try
+                {
+                    byte[] data = Convert.FromBase64String(fileBuffer.ToString());
+                    Directory.CreateDirectory(currentPath);
+                    string fullPath = Path.Combine(currentPath, currentName);
+                    File.WriteAllBytes(fullPath, data);
+
+                    // Распаковка
+                    string extractFolder = Path.Combine(currentPath, Path.GetFileNameWithoutExtension(currentName));
+                    System.IO.Compression.ZipFile.ExtractToDirectory(fullPath, extractFolder, true);
+
+                    await SendText(client, $"Folder extracted to {extractFolder}");
+                    Console.WriteLine($"Extracted: {extractFolder}");
+                }
+                catch (Exception ex)
+                {
+                    await SendText(client, $"Error extracting ZIP: {ex.Message}");
+                }
+                finally
+                {
+                    receivingFile = false;
+                    fileBuffer.Clear();
+                }
             }
             else
             {
