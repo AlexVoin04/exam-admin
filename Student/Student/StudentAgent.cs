@@ -127,6 +127,13 @@ class StudentAgent
                     string extractFolder = Path.Combine(currentPath, Path.GetFileNameWithoutExtension(currentName));
                     System.IO.Compression.ZipFile.ExtractToDirectory(fullPath, extractFolder, true);
 
+                    // Удаляем ZIP после успешной распаковки
+                    if (File.Exists(fullPath))
+                    {
+                        File.Delete(fullPath);
+                        Console.WriteLine($"Deleted temporary archive: {fullPath}");
+                    }
+
                     await SendText(client, $"Folder extracted to {extractFolder}");
                     Console.WriteLine($"Extracted: {extractFolder}");
                 }
