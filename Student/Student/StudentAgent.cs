@@ -127,6 +127,13 @@ class StudentAgent
                     string extractFolder = Path.Combine(currentPath, Path.GetFileNameWithoutExtension(currentName));
                     System.IO.Compression.ZipFile.ExtractToDirectory(fullPath, extractFolder, true);
 
+                    // Удаляем ZIP после успешной распаковки
+                    if (File.Exists(fullPath))
+                    {
+                        File.Delete(fullPath);
+                        Console.WriteLine($"Deleted temporary archive: {fullPath}");
+                    }
+
                     await SendText(client, $"Folder extracted to {extractFolder}");
                     Console.WriteLine($"Extracted: {extractFolder}");
                 }
@@ -138,6 +145,58 @@ class StudentAgent
                 {
                     receivingFile = false;
                     fileBuffer.Clear();
+                }
+            }
+            else if (msg.StartsWith("clean_dir:"))
+            {
+                string path = msg.Substring(10).Trim();
+                try
+                {
+                    if (Directory.Exists(path))
+                    {
+                        var dirInfo = new DirectoryInfo(path);
+
+                        // Удаляем все файлы, кроме .exe и .lnk
+                        foreach (var file in dirInfo.GetFiles("*", SearchOption.TopDirectoryOnly))
+                        {
+                            if (!file.Extension.Equals(".exe", StringComparison.OrdinalIgnoreCase) &&
+                                !file.Extension.Equals(".lnk", StringComparison.OrdinalIgnoreCase))
+                            {
+                                try
+                                {
+                                    file.Delete();
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"[!] Failed to delete {file.Name}: {ex.Message}");
+                                }
+                            }
+                        }
+
+                        // Удаляем все папки
+                        foreach (var dir in dirInfo.GetDirectories("*", SearchOption.TopDirectoryOnly))
+                        {
+                            try
+                            {
+                                dir.Delete(true);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"[!] Failed to delete folder {dir.Name}: {ex.Message}");
+                            }
+                        }
+
+                        await SendText(client, $"{{\"status\":\"ok\",\"message\":\"Folder cleaned: {path}\"}}");
+                        Console.WriteLine($"Cleaned: {path}");
+                    }
+                    else
+                    {
+                        await SendText(client, $"{{\"status\":\"error\",\"message\":\"Path not found: {path}\"}}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    await SendText(client, $"{{\"status\":\"error\",\"message\":\"{ex.Message}\"}}");
                 }
             }
             else
