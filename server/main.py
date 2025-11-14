@@ -155,4 +155,4 @@ async def clean_folder(client_id: str, path: str = Form(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
