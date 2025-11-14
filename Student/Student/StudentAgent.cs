@@ -2,6 +2,7 @@
 using System.IO;
 using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -41,7 +42,7 @@ class StudentAgent
         Console.WriteLine(" Waiting for server connection... ");
         Console.WriteLine("=====================================");
 
-        while (true) // бесконечный цикл-страж
+        while (true)
         {
             ClientWebSocket client = new ClientWebSocket();
 
@@ -63,195 +64,200 @@ class StudentAgent
         }
     }
 
-    static async Task HandleConnection(ClientWebSocket client)
+    static async Task HandleConnection(ClientWebSocket ws)
     {
-        var buffer = new byte[8192];
-        StringBuilder fileBuffer = new();
-        string currentPath = null, currentName = null;
-        bool receivingFile = false;
+        byte[] buffer = new byte[1024 * 1024];
 
-        while (client.State == WebSocketState.Open)
+        while (ws.State == WebSocketState.Open)
         {
-            WebSocketReceiveResult result;
-
             try
             {
-                result = await client.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
-            }
-            catch
-            {
-                // разрыв соединения
-                break;
-            }
+                var ms = new MemoryStream();
+                WebSocketReceiveResult res;
 
-            if (result.MessageType == WebSocketMessageType.Close)
-                break;
+                do
+                {
+                    res = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
 
-            string msg = Encoding.UTF8.GetString(buffer, 0, result.Count);
-
-            // ✨ — твоя логика обработки команд ниже (оставь без изменений)
-            //-------------------------------------------------------------
-            if (msg.StartsWith("file_start"))
-            {
-                string[] parts = msg.Split(new string[] { "|||" }, StringSplitOptions.None);
-                currentPath = parts[1];
-                currentName = parts[2];
-                fileBuffer.Clear();
-                receivingFile = true;
-                Console.WriteLine($"Receiving file {currentName} to {currentPath}...");
-            }
-            else if (msg.StartsWith("file_data:") && receivingFile)
-            {
-                fileBuffer.Append(msg.Substring(10));
-            }
-            else if (msg == "file_end" && receivingFile)
-            {
-                try
-                {
-                    byte[] data = Convert.FromBase64String(fileBuffer.ToString());
-                    Directory.CreateDirectory(currentPath);
-                    string fullPath = Path.Combine(currentPath, currentName);
-                    File.WriteAllBytes(fullPath, data);
-                    await SendText(client, $"File '{currentName}' saved to {currentPath}");
-                    Console.WriteLine($"Saved: {fullPath}");
-                }
-                catch (Exception ex)
-                {
-                    await SendText(client, $"Error saving file: {ex.Message}");
-                }
-                finally
-                {
-                    receivingFile = false;
-                    fileBuffer.Clear();
-                }
-            }
-            else if (msg == "get_desktop_path")
-            {
-                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-                await SendText(client, desktop);
-                Console.WriteLine($"Desktop path sent: {desktop}");
-            }
-            else if (msg.StartsWith("listdir:"))
-            {
-                string path = msg.Substring(8).Trim();
-                try
-                {
-                    if (Directory.Exists(path))
+                    if (res.MessageType == WebSocketMessageType.Close)
                     {
-                        var dirs = Directory.GetDirectories(path);
-                        var files = Directory.GetFiles(path);
+                        await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None);
+                        return;
+                    }
 
-                        var json = new StringBuilder();
-                        json.Append("{");
-                        json.Append("\"folders\":[");
-                        json.Append(string.Join(",", Array.ConvertAll(dirs, d => $"\"{d.Replace("\\", "\\\\")}\"")));
-                        json.Append("],");
-                        json.Append("\"files\":[");
-                        json.Append(string.Join(",", Array.ConvertAll(files, f => $"\"{f.Replace("\\", "\\\\")}\"")));
-                        json.Append("]");
-                        json.Append("}");
+                    ms.Write(buffer, 0, res.Count);
 
-                        await SendText(client, json.ToString());
-                        Console.WriteLine($"Listed {path}");
+                } while (!res.EndOfMessage);
+
+                string msg = Encoding.UTF8.GetString(ms.ToArray());
+
+                JsonDocument doc;
+                try { doc = JsonDocument.Parse(msg); }
+                catch
+                {
+                    Console.WriteLine("Invalid JSON received (ignored)");
+                    continue;
+                }
+
+                var root = doc.RootElement;
+
+                if (!root.TryGetProperty("command_id", out var cmdIDprop))
+                    continue;
+
+                string command_id = cmdIDprop.GetString();
+                string type = root.GetProperty("type").GetString();
+
+                //--------------------------------------------------------------------
+                // COMMAND WRAPPER
+                //--------------------------------------------------------------------
+                if (type == "command")
+                {
+                    string command = root.GetProperty("command").GetString();
+
+                    object result = ExecuteSimpleCommand(command);
+
+                    await SendResponse(ws, command_id, "ok", result);
+                }
+                //--------------------------------------------------------------------
+                // FILE UPLOAD CHUNK — FIXED
+                //--------------------------------------------------------------------
+                else if (type == "file_upload_chunk")
+                {
+                    string target = root.GetProperty("target_path").GetString();
+                    string filename = root.GetProperty("filename").GetString();
+                    int index = root.GetProperty("chunk_index").GetInt32();
+                    int total = root.GetProperty("total_chunks").GetInt32();
+                    string data = root.GetProperty("data").GetString();
+
+                    Directory.CreateDirectory(target);
+
+                    string tempFile = Path.Combine(target, filename + ".tmp");
+                    byte[] bytes = Convert.FromBase64String(data);
+
+                    using (var fs = new FileStream(tempFile, FileMode.Append, FileAccess.Write))
+                        fs.Write(bytes, 0, bytes.Length);
+
+                    Console.WriteLine($"Chunk {index + 1}/{total} received");
+
+                    object resultObj;
+
+                    if (index == total - 1)
+                    {
+                        string final = Path.Combine(target, filename);
+
+                        if (File.Exists(final)) File.Delete(final);
+                        File.Move(tempFile, final);
+
+                        Console.WriteLine("File fully received, size = " + new FileInfo(final).Length);
+
+                        if (Path.GetExtension(final).ToLower() == ".zip")
+                        {
+                            string extract = Path.Combine(target, Path.GetFileNameWithoutExtension(filename));
+                            Console.WriteLine("Extracting ZIP...");
+
+                            System.IO.Compression.ZipFile.ExtractToDirectory(final, extract, true);
+
+                            File.Delete(final);
+
+                            resultObj = $"Extracted to {extract}";
+                        }
+                        else
+                        {
+                            resultObj = $"Saved {final}";
+                        }
                     }
                     else
                     {
-                        await SendText(client, $"{{\"error\":\"Path not found: {path}\"}}");
+                        resultObj = $"Chunk {index + 1}/{total} OK";
                     }
+
+                    await SendResponse(ws, command_id, "ok", resultObj);
                 }
-                catch (Exception ex)
+                else
                 {
-                    await SendText(client, $"{{\"error\":\"{ex.Message}\"}}");
+                    await SendResponse(ws, command_id, "error", $"unknown type: {type}");
                 }
             }
-            else if (msg.StartsWith("zip_start"))
+            catch (Exception ex)
             {
-                string[] parts = msg.Split(new string[] { "|||" }, StringSplitOptions.None);
-                currentPath = parts[1];
-                currentName = parts[2];
-                fileBuffer.Clear();
-                receivingFile = true;
-                Console.WriteLine($"Receiving ZIP {currentName} to {currentPath}...");
-            }
-            else if (msg.StartsWith("zip_data:") && receivingFile)
-            {
-                fileBuffer.Append(msg.Substring(9));
-            }
-            else if (msg == "zip_end" && receivingFile)
-            {
-                try
-                {
-                    byte[] data = Convert.FromBase64String(fileBuffer.ToString());
-                    Directory.CreateDirectory(currentPath);
-                    string fullPath = Path.Combine(currentPath, currentName);
-                    File.WriteAllBytes(fullPath, data);
-
-                    string extractFolder = Path.Combine(currentPath, Path.GetFileNameWithoutExtension(currentName));
-                    System.IO.Compression.ZipFile.ExtractToDirectory(fullPath, extractFolder, true);
-
-                    if (File.Exists(fullPath))
-                        File.Delete(fullPath);
-
-                    await SendText(client, $"Folder extracted to {extractFolder}");
-                    Console.WriteLine($"Extracted: {extractFolder}");
-                }
-                catch (Exception ex)
-                {
-                    await SendText(client, $"Error extracting ZIP: {ex.Message}");
-                }
-                finally
-                {
-                    receivingFile = false;
-                    fileBuffer.Clear();
-                }
-            }
-            else if (msg.StartsWith("clean_dir:"))
-            {
-                string path = msg.Substring(10).Trim();
-                try
-                {
-                    if (Directory.Exists(path))
-                    {
-                        var dirInfo = new DirectoryInfo(path);
-
-                        foreach (var file in dirInfo.GetFiles("*", SearchOption.TopDirectoryOnly))
-                        {
-                            if (!file.Extension.Equals(".exe") &&
-                                !file.Extension.Equals(".lnk"))
-                            {
-                                try { file.Delete(); }
-                                catch { }
-                            }
-                        }
-
-                        foreach (var dir in dirInfo.GetDirectories("*", SearchOption.TopDirectoryOnly))
-                        {
-                            try { dir.Delete(true); }
-                            catch { }
-                        }
-
-                        await SendText(client, $"{{\"status\":\"ok\",\"message\":\"Folder cleaned: {path}\"}}");
-                    }
-                    else
-                    {
-                        await SendText(client, $"{{\"status\":\"error\",\"message\":\"Path not found: {path}\"}}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    await SendText(client, $"{{\"status\":\"error\",\"message\":\"{ex.Message}\"}}");
-                }
-            }
-            else
-            {
-                await SendText(client, "Unknown command");
+                Console.WriteLine($"Error: {ex}");
+                await Task.Delay(200);
             }
         }
     }
 
-    static async Task SendText(ClientWebSocket ws, string text)
+    static object ExecuteSimpleCommand(string command)
     {
-        var bytes = Encoding.UTF8.GetBytes(text);
-        await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
+        if (command == "get_desktop_path")
+            return Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+
+        if (command.StartsWith("listdir:"))
+        {
+            string path = command.Substring(8);
+
+            if (!Directory.Exists(path))
+                return "Path not found";
+
+            return Directory.GetFiles(path);
+        }
+
+        if (command.StartsWith("clean_dir:"))
+        {
+            string path = command.Substring(10);
+
+            if (!Directory.Exists(path))
+                return "Path not found";
+
+            string[] allowedExtensions = { ".exe", ".lnk" };
+
+            foreach (var f in Directory.GetFiles(path))
+            {
+                string ext = Path.GetExtension(f).ToLower();
+
+                if (Array.Exists(allowedExtensions, e => e == ext))
+                {
+                    Console.WriteLine($"Skipped: {f}");
+                    continue; // не удаляем exe и lnk
+                }
+
+                try
+                {
+                    File.Delete(f);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Failed to delete file {f}: {ex.Message}");
+                }
+            }
+
+            foreach (var d in Directory.GetDirectories(path))
+            {
+                try
+                {
+                    Directory.Delete(d, true);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Failed to delete directory {d}: {ex.Message}");
+                }
+            }
+
+            return "Cleaned (exe and lnk preserved)";
+        }
+
+        return $"Unknown command: {command}";
+    }
+
+    static async Task SendResponse(ClientWebSocket ws, string cmdid, string status, object result)
+    {
+        var resp = new
+        {
+            command_id = cmdid,
+            status = status,
+            result = result
+        };
+
+        string json = JsonSerializer.Serialize(resp);
+        await ws.SendAsync(Encoding.UTF8.GetBytes(json), WebSocketMessageType.Text, true, CancellationToken.None);
     }
 }

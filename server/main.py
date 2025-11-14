@@ -1,163 +1,157 @@
 import shutil
 import tempfile
-import zipfile
 from fastapi import FastAPI, WebSocket, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 import asyncio
 import base64
 import json
 import os
+import uuid
 
 app = FastAPI()
 clients = {}  # { client_id: { "ws": websocket, "queue": asyncio.Queue() } }
 
+CHUNK_SIZE = 512 * 1024  # 512 KB
+
+# ---------------- WebSocket ----------------
+# ---------------- WebSocket ----------------
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
     await websocket.accept()
-    clients[client_id] = {"ws": websocket, "queue": asyncio.Queue()}
+    pending = {}
+    clients[client_id] = {"ws": websocket, "pending": pending}
     print(f"[+] {client_id} connected")
 
     try:
         while True:
-            data = await websocket.receive_text()
-            print(f"<-- {client_id}: {data}")
-            # Сохранение последнего сообщения в очередь
-            await clients[client_id]["queue"].put(data)
+            text = await websocket.receive_text()
+            try:
+                parsed = json.loads(text)
+            except:
+                parsed = None
+
+            if isinstance(parsed, dict) and "command_id" in parsed:
+                cmdid = parsed["command_id"]
+                fut = pending.pop(cmdid, None)
+                if fut and not fut.done():
+                    fut.set_result(parsed)
+            else:
+                if pending:
+                    first_cmdid = next(iter(pending))
+                    fut = pending.pop(first_cmdid, None)
+                    if fut and not fut.done():
+                        fut.set_result({"command_id": first_cmdid, "raw": text})
     except Exception as e:
         print(f"[-] {client_id} disconnected: {e}")
+    finally:
+        for fut in list(pending.values()):
+            if not fut.done():
+                fut.cancel()
         clients.pop(client_id, None)
 
+# ---------------- List clients ----------------
 @app.get("/clients")
 async def list_clients():
-    return JSONResponse({
-        "connected": list(clients.keys()),
-        "count": len(clients)
-    })
+    return JSONResponse({"connected": list(clients.keys()), "count": len(clients)})
 
+# ---------------- Core command send ----------------
+async def send_command_with_id(client_id: str, command: str):
+    client = clients.get(client_id)
+    if not client:
+        return {"status": "offline"}
+
+    ws = client["ws"]
+    pending = client["pending"]
+
+    cmdid = str(uuid.uuid4())
+    fut = asyncio.get_running_loop().create_future()
+    pending[cmdid] = fut
+
+    # Если 'command' — строка JSON (объект), раскрываем её и добавляем command_id,
+    # иначе отправляем как обычную команду wrapper
+    try:
+        parsed_cmd = json.loads(command)
+        if isinstance(parsed_cmd, dict):
+            payload = parsed_cmd
+            payload["command_id"] = cmdid
+        else:
+            payload = {"type": "command", "command": command, "command_id": cmdid}
+    except Exception:
+        payload = {"type": "command", "command": command, "command_id": cmdid}
+
+    await ws.send_text(json.dumps(payload))
+    print(f"--> Sent to {client_id}: {payload}")
+
+    try:
+        # увеличить таймаут для больших файлов
+        result = await asyncio.wait_for(fut, timeout=300.0)
+        return {"status": "ok", "response": result}
+    except asyncio.TimeoutError:
+        pending.pop(cmdid, None)
+        return {"status": "timeout"}
+    except asyncio.CancelledError:
+        return {"status": "disconnected"}
+    except Exception as e:
+        pending.pop(cmdid, None)
+        return {"status": "error", "error": str(e)}
+
+# ---------------- Send generic command ----------------
 @app.post("/send/{client_id}")
 async def send_command(client_id: str, command: str):
-    client = clients.get(client_id)
-    if not client:
-        return JSONResponse({"status": "offline"})
+    return JSONResponse(await send_command_with_id(client_id, command))
 
-    ws = client["ws"]
-    queue = client["queue"]
-
-    while not queue.empty():
-        try:
-            queue.get_nowait()
-        except:
-            break
-
-    await ws.send_text(command)
-    print(f"--> Sent to {client_id}: {command}")
-
-    try:
-        # ожидание ответа из очереди, не блокируя основной приёмник
-        result = await asyncio.wait_for(queue.get(), timeout=10.0)
-        try:
-            parsed = json.loads(result)
-            return {"status": "ok", "result": parsed}
-        except json.JSONDecodeError:
-            return {"status": "ok", "result": result}
-    except asyncio.TimeoutError:
-        return JSONResponse({"status": "timeout"})
-
+# ---------------- Upload file ----------------
 @app.post("/upload/{client_id}")
-async def upload_file(
-    client_id: str,
-    file: UploadFile = File(...),
-    target_path: str = Form("C:\\ExamFiles")
-):
-    client = clients.get(client_id)
-    if not client:
-        return JSONResponse({"status": "offline"})
-
-    ws = client["ws"]
-    content = await file.read()
-    encoded = base64.b64encode(content).decode("utf-8")
-
-    # безопасный разделитель
-    sep = "|||"
-
-    await ws.send_text(f"file_start{sep}{target_path}{sep}{file.filename}")
-
-    chunk_size = 8000
-    for i in range(0, len(encoded), chunk_size):
-        chunk = encoded[i:i + chunk_size]
-        await ws.send_text(f"file_data:{chunk}")
-
-    await ws.send_text("file_end")
-
-    print(f"--> Sent file '{file.filename}' to {client_id} → {target_path}")
-    return JSONResponse({
-        "status": "sent",
-        "filename": file.filename,
-        "target_path": target_path
-    })
-
-@app.post("/upload_folder/{client_id}")
-async def upload_folder(client_id: str, source_path: str = Form(...), target_path: str = Form(...)):
+async def upload(client_id: str, file: UploadFile = File(None), source_path: str = Form(None), target_path: str = Form(...)):
     """
-    Упаковывает папку source_path в zip и отправляет клиенту,
-    который потом её распакует в target_path.
+    - file: загружаем обычный файл
+    - source_path: локальная папка для загрузки
+    - target_path: конечный путь на клиенте
     """
-    client = clients.get(client_id)
-    if not client:
-        return JSONResponse({"status": "offline"})
+    # Определяем, что загружаем
+    is_folder = source_path is not None
 
-    ws = client["ws"]
+    if is_folder:
+        if not os.path.isdir(source_path):
+            return {"status": "error", "message": "Source folder not found"}
+        # Создаем временный ZIP
+        tmp_zip = tempfile.mktemp(suffix=".zip")
+        shutil.make_archive(tmp_zip[:-4], "zip", source_path)
+        with open(tmp_zip, "rb") as f:
+            content = f.read()
+        os.remove(tmp_zip)
+        filename = os.path.basename(source_path.rstrip("\\/")) + ".zip"
+    else:
+        if not file:
+            return {"status": "error", "message": "No file provided"}
+        content = await file.read()
+        filename = file.filename
 
-    if not os.path.isdir(source_path):
-        return JSONResponse({"status": "error", "message": "Source folder not found"})
+    total_chunks = (len(content) + CHUNK_SIZE - 1) // CHUNK_SIZE
+    responses = []
 
-    # Временный ZIP
-    tmp_zip = tempfile.mktemp(suffix=".zip")
-    shutil.make_archive(tmp_zip[:-4], "zip", source_path)
+    for i in range(total_chunks):
+        chunk_data = content[i*CHUNK_SIZE:(i+1)*CHUNK_SIZE]
+        encoded = base64.b64encode(chunk_data).decode("utf-8")
+        command_payload = {
+            "type": "file_upload_chunk",
+            "target_path": target_path,
+            "filename": filename,
+            "chunk_index": i,
+            "total_chunks": total_chunks,
+            "data": encoded
+        }
+        command = json.dumps(command_payload)
+        resp = await send_command_with_id(client_id, command)
+        responses.append(resp)
 
-    # Читаем и кодируем ZIP
-    with open(tmp_zip, "rb") as f:
-        content = f.read()
-    encoded = base64.b64encode(content).decode("utf-8")
+    return JSONResponse({"status": "ok", "chunks_sent": total_chunks, "responses": responses})
 
-    sep = "|||"
-    zip_name = os.path.basename(source_path.rstrip("\\/")) + ".zip"
-
-    await ws.send_text(f"zip_start{sep}{target_path}{sep}{zip_name}")
-
-    chunk_size = 8000
-    for i in range(0, len(encoded), chunk_size):
-        await ws.send_text(f"zip_data:{encoded[i:i + chunk_size]}")
-
-    await ws.send_text("zip_end")
-
-    os.remove(tmp_zip)
-    print(f"--> Sent folder '{source_path}' as {zip_name} → {target_path}")
-    return {"status": "sent", "folder": source_path, "target": target_path}
-
+# ---------------- Clean folder ----------------
 @app.post("/clean_folder/{client_id}")
 async def clean_folder(client_id: str, path: str = Form(...)):
-    """
-    Очищает указанную папку на клиенте, кроме .exe и .lnk файлов.
-    """
-    client = clients.get(client_id)
-    if not client:
-        return JSONResponse({"status": "offline"})
-
-    ws = client["ws"]
-    queue = client["queue"]
-
     command = f"clean_dir:{path}"
-    await ws.send_text(command)
-    print(f"--> Sent cleanup command to {client_id}: {path}")
-
-    try:
-        result = await asyncio.wait_for(queue.get(), timeout=10.0)
-        return JSONResponse({"status": "ok", "result": json.loads(result)})
-    except asyncio.TimeoutError:
-        return JSONResponse({"status": "timeout"})
-    except json.JSONDecodeError:
-        return JSONResponse({"status": "ok", "result": result})
+    return JSONResponse(await send_command_with_id(client_id, command))
 
 if __name__ == "__main__":
     import uvicorn

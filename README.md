@@ -111,7 +111,7 @@ curl -X POST -F "file=@Doc1.docx" -F "target_path=C:\Users\{client_id}\Desktop" 
 
 #### 📦 Отправка целой папки
 ```bash
-POST /upload_folder/{client_id}
+POST /upload/{client_id}
 ```
 Параметры (form-data):
 - `source_path`: путь к папке на сервере
@@ -119,7 +119,7 @@ POST /upload_folder/{client_id}
 
 Пример:
 ```bash
-curl -X POST "http://127.0.0.1:8000/upload_folder/{client_id}" -F "source_path=C:/Users/Ivanov-AS.NATK/Downloads/PR3CreatingAWPF-master" -F "target_path=C:/Users/Ivanov-AS.NATK/Desktop"
+curl -X POST "http://127.0.0.1:8000/upload/{client_id}" -F "source_path=C:/Users/Ivanov-AS.NATK/Downloads/PR3CreatingAWPF-master" -F "target_path=C:/Users/Ivanov-AS.NATK/Desktop"
 ```
 
 #### 🗑️ Очистка папки на клиенте
