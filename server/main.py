@@ -43,6 +43,12 @@ async def send_command(client_id: str, command: str):
     ws = client["ws"]
     queue = client["queue"]
 
+    while not queue.empty():
+        try:
+            queue.get_nowait()
+        except:
+            break
+
     await ws.send_text(command)
     print(f"--> Sent to {client_id}: {command}")
 

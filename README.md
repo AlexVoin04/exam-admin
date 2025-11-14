@@ -69,9 +69,15 @@ dotnet build -c Release
 
 Запусти агент вручную или через автозапуск::
 ```bash
-StudentAgent.exe student01
+StudentAgent.exe --id=student01 --server=10.137.203.94
 ```
-агрумент `student01` - ID студента для определения
+или
+```bash
+StudentAgent.exe -i student01 -s 10.137.203.94
+```
+
+- агрумент `student01` - ID студента для определения
+- агрумент `10.137.203.94` - IP сервера
 
 > Если аргумент не передан, клиент автоматически использует имя текущего пользователя (Environment.UserName) как идентификатор.
 
@@ -100,7 +106,7 @@ POST /upload/{client_id}
 
 Пример:
 ```bash
-curl -X POST -F "file=@Doc1.docx" -F "target_path=C:\Users\Ivanov-AS\Desktop" http://127.0.0.1:8000/upload/Ivanov-AS
+curl -X POST -F "file=@Doc1.docx" -F "target_path=C:\Users\{client_id}\Desktop" http://127.0.0.1:8000/upload/Ivanov-AS
 ```
 
 #### 📦 Отправка целой папки
@@ -113,7 +119,7 @@ POST /upload_folder/{client_id}
 
 Пример:
 ```bash
-curl -X POST -F "source_path=C:\Server\Materials" -F "target_path=C:\Users\Ivanov-AS\Desktop" http://127.0.0.1:8000/upload_folder/Ivanov-AS
+curl -X POST "http://127.0.0.1:8000/upload_folder/{client_id}" -F "source_path=C:/Users/Ivanov-AS.NATK/Downloads/PR3CreatingAWPF-master" -F "target_path=C:/Users/Ivanov-AS.NATK/Desktop"
 ```
 
 #### 🗑️ Очистка папки на клиенте
@@ -125,7 +131,7 @@ POST /clean_folder/{client_id}
 
 Пример:
 ```bash
-curl -X POST -F "path=C:\Users\Ivanov-AS\Desktop\Test" http://127.0.0.1:8000/clean_folder/Ivanov-AS
+curl -X POST -F "path=C:\Users\{client_id}\Desktop\teststr" http://127.0.0.1:8000/clean_folder/Ivanov-AS
 ```
 
 >Удаляет всё содержимое кроме `.exe` и `.lnk` файлов.
@@ -136,7 +142,7 @@ POST /send/{client_id}?command=listdir:<path>
 ```
 Пример:
 ```bash
-curl -X POST "http://127.0.0.1:8000/send/Ivanov-AS?command=listdir:C:\Users\Ivanov-AS\Desktop"
+curl -X POST "http://127.0.0.1:8000/send/{client_id}?command=listdir:C:\Users\Ivanov-AS\Desktop"
 ```
 
 Ответ:

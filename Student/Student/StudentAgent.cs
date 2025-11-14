@@ -9,14 +9,62 @@ class StudentAgent
 {
     static async Task Main(string[] args)
     {
-        string studentId = args.Length > 0 ? args[0] : Environment.UserName;
-        string serverUrl = $"ws://127.0.0.1:8000/ws/{studentId}";
-        Console.WriteLine($"Connecting as {studentId}...");
+        string studentId = Environment.UserName;
+        string serverIP = "127.0.0.1";
 
-        var client = new ClientWebSocket();
-        await client.ConnectAsync(new Uri(serverUrl), CancellationToken.None);
-        Console.WriteLine("Connected to server...");
+        foreach (var arg in args)
+        {
+            if (arg.StartsWith("--id="))
+                studentId = arg.Substring("--id=".Length).Trim();
 
+            else if (arg.StartsWith("--server="))
+                serverIP = arg.Substring("--server=".Length).Trim();
+
+            else if (arg == "-i" || arg == "-ш")
+            {
+                int index = Array.IndexOf(args, arg);
+                if (index >= 0 && index < args.Length - 1)
+                    studentId = args[index + 1];
+            }
+            else if (arg == "-s")
+            {
+                int index = Array.IndexOf(args, arg);
+                if (index >= 0 && index < args.Length - 1)
+                    serverIP = args[index + 1];
+            }
+        }
+
+        string serverUrl = $"ws://{serverIP}:8000/ws/{studentId}";
+        Console.WriteLine($"Student ID: {studentId}");
+        Console.WriteLine($"Server IP: {serverIP}");
+        Console.WriteLine("=====================================");
+        Console.WriteLine(" Waiting for server connection... ");
+        Console.WriteLine("=====================================");
+
+        while (true) // бесконечный цикл-страж
+        {
+            ClientWebSocket client = new ClientWebSocket();
+
+            try
+            {
+                await client.ConnectAsync(new Uri(serverUrl), CancellationToken.None);
+                Console.WriteLine($"Connected to server: {serverUrl}");
+
+                // начать обработку сообщений
+                await HandleConnection(client);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Connection error: {ex.Message}");
+            }
+
+            Console.WriteLine("Lost connection. Reconnecting in 5 seconds...");
+            await Task.Delay(5000);
+        }
+    }
+
+    static async Task HandleConnection(ClientWebSocket client)
+    {
         var buffer = new byte[8192];
         StringBuilder fileBuffer = new();
         string currentPath = null, currentName = null;
@@ -24,9 +72,25 @@ class StudentAgent
 
         while (client.State == WebSocketState.Open)
         {
-            var result = await client.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+            WebSocketReceiveResult result;
+
+            try
+            {
+                result = await client.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+            }
+            catch
+            {
+                // разрыв соединения
+                break;
+            }
+
+            if (result.MessageType == WebSocketMessageType.Close)
+                break;
+
             string msg = Encoding.UTF8.GetString(buffer, 0, result.Count);
 
+            // ✨ — твоя логика обработки команд ниже (оставь без изменений)
+            //-------------------------------------------------------------
             if (msg.StartsWith("file_start"))
             {
                 string[] parts = msg.Split(new string[] { "|||" }, StringSplitOptions.None);
@@ -38,7 +102,7 @@ class StudentAgent
             }
             else if (msg.StartsWith("file_data:") && receivingFile)
             {
-                fileBuffer.Append(msg.Substring(10)); // добавляем кусок base64
+                fileBuffer.Append(msg.Substring(10));
             }
             else if (msg == "file_end" && receivingFile)
             {
@@ -77,7 +141,6 @@ class StudentAgent
                         var dirs = Directory.GetDirectories(path);
                         var files = Directory.GetFiles(path);
 
-                        // Формируем JSON вручную
                         var json = new StringBuilder();
                         json.Append("{");
                         json.Append("\"folders\":[");
@@ -123,16 +186,11 @@ class StudentAgent
                     string fullPath = Path.Combine(currentPath, currentName);
                     File.WriteAllBytes(fullPath, data);
 
-                    // Распаковка
                     string extractFolder = Path.Combine(currentPath, Path.GetFileNameWithoutExtension(currentName));
                     System.IO.Compression.ZipFile.ExtractToDirectory(fullPath, extractFolder, true);
 
-                    // Удаляем ZIP после успешной распаковки
                     if (File.Exists(fullPath))
-                    {
                         File.Delete(fullPath);
-                        Console.WriteLine($"Deleted temporary archive: {fullPath}");
-                    }
 
                     await SendText(client, $"Folder extracted to {extractFolder}");
                     Console.WriteLine($"Extracted: {extractFolder}");
@@ -156,38 +214,23 @@ class StudentAgent
                     {
                         var dirInfo = new DirectoryInfo(path);
 
-                        // Удаляем все файлы, кроме .exe и .lnk
                         foreach (var file in dirInfo.GetFiles("*", SearchOption.TopDirectoryOnly))
                         {
-                            if (!file.Extension.Equals(".exe", StringComparison.OrdinalIgnoreCase) &&
-                                !file.Extension.Equals(".lnk", StringComparison.OrdinalIgnoreCase))
+                            if (!file.Extension.Equals(".exe") &&
+                                !file.Extension.Equals(".lnk"))
                             {
-                                try
-                                {
-                                    file.Delete();
-                                }
-                                catch (Exception ex)
-                                {
-                                    Console.WriteLine($"[!] Failed to delete {file.Name}: {ex.Message}");
-                                }
+                                try { file.Delete(); }
+                                catch { }
                             }
                         }
 
-                        // Удаляем все папки
                         foreach (var dir in dirInfo.GetDirectories("*", SearchOption.TopDirectoryOnly))
                         {
-                            try
-                            {
-                                dir.Delete(true);
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"[!] Failed to delete folder {dir.Name}: {ex.Message}");
-                            }
+                            try { dir.Delete(true); }
+                            catch { }
                         }
 
                         await SendText(client, $"{{\"status\":\"ok\",\"message\":\"Folder cleaned: {path}\"}}");
-                        Console.WriteLine($"Cleaned: {path}");
                     }
                     else
                     {
