@@ -69,11 +69,11 @@ dotnet build -c Release
 
 Запусти агент вручную или через автозапуск::
 ```bash
-StudentAgent.exe --id=student01 --server=10.137.203.94
+./Student.exe --id=student01 --server=10.137.203.94
 ```
 или
 ```bash
-StudentAgent.exe -i student01 -s 10.137.203.94
+./Student.exe -i student01 -s 10.137.203.94
 ```
 
 - агрумент `student01` - ID студента для определения

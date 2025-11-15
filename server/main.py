@@ -14,12 +14,25 @@ clients = {}  # { client_id: { "ws": websocket, "queue": asyncio.Queue() } }
 CHUNK_SIZE = 512 * 1024  # 512 KB
 
 # ---------------- WebSocket ----------------
-# ---------------- WebSocket ----------------
 @app.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
     await websocket.accept()
-    pending = {}
-    clients[client_id] = {"ws": websocket, "pending": pending}
+
+    if client_id in clients:
+        await websocket.send_json({
+            "type": "error",
+            "message": "client_id_already_used",
+            "detail": f"ID '{client_id}' is already connected"
+        })
+
+        await asyncio.sleep(0.1)
+
+        await websocket.close()
+        print(f"[!] Rejected duplicate client_id: {client_id}")
+        return
+
+    clients[client_id] = {"ws": websocket, "pending": {}}
+    pending = clients[client_id]["pending"]
     print(f"[+] {client_id} connected")
 
     try:

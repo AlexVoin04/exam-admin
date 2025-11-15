@@ -101,6 +101,26 @@ class StudentAgent
 
                 var root = doc.RootElement;
 
+                if (root.TryGetProperty("type", out var typeProp))
+                {
+                    string t = typeProp.GetString();
+
+                    // Обработка ошибок сервера ДО проверки command_id
+                    if (t == "error")
+                    {
+                        string msgText = root.GetProperty("message").GetString();
+                        Console.WriteLine("Server error: " + msgText);
+
+                        if (msgText == "client_id_already_used")
+                        {
+                            Console.WriteLine("This ID is already connected. Stopping client.");
+                            Environment.Exit(0);
+                        }
+
+                        continue;
+                    }
+                }
+
                 if (!root.TryGetProperty("command_id", out var cmdIDprop))
                     continue;
 
