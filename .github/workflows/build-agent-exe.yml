@@ -19,10 +19,10 @@ jobs:
           dotnet-version: 9.0.x
 
       - name: Restore dependencies
-        run: dotnet restore
+        run: dotnet restore Student/Student/Student.csproj
 
       - name: Publish self-contained Windows build (NO CONSOLE)
-        run: dotnet publish -c Release -r win-x64 -p:PublishSingleFile=true -p:PublishTrimmed=false -p:IncludeNativeLibrariesForSelfExtract=true -p:OutputType=WinExe -o build/
+        run: dotnet publish Student/Student/Student.csproj -c Release -r win-x64 -p:PublishSingleFile=true -p:PublishTrimmed=false -p:IncludeNativeLibrariesForSelfExtract=true -p:OutputType=WinExe -o build/
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
